@@ -3,6 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Author: Fast Friends -->
+    <!-- Prevent the HTML page itself from being cached by browsers / CDNs -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Processing Request...</title>
     <style>
         body {
@@ -37,18 +42,10 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        .success {
-            color: #4CAF50;
-            font-size: 1.2rem;
-            font-weight: bold;
-        }
-        .error {
-            color: #f44336;
-            font-size: 1rem;
-        }
-        .hidden {
-            display: none;
-        }
+        .success { color: #4CAF50; font-size: 1.2rem; font-weight: bold; }
+        .error   { color: #f44336; font-size: 1rem; }
+        .hidden  { display: none; }
+        small.debug { opacity: 0.7; display: block; margin-top: 1rem; font-size: 0.75rem; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -58,83 +55,143 @@
             <h2>Processing your request...</h2>
             <p>Please wait while we trigger your webhook.</p>
         </div>
-        
+
         <div id="success" class="hidden">
-            <h2 class="success">✓ Success!</h2>
+            <h2 class="success">&#10003; Success!</h2>
             <p>Your webhook has been triggered successfully.</p>
             <p><small>This window will close in <span id="countdown">3</span> seconds...</small></p>
         </div>
-        
+
         <div id="error" class="hidden">
-            <h2 class="error">✗ Error</h2>
+            <h2 class="error">&#10007; Error</h2>
             <p>There was an issue triggering your webhook.</p>
             <p><small id="error-message"></small></p>
+            <small class="debug" id="debug-info"></small>
         </div>
     </div>
 
     <script>
-        // Configuration - REPLACE WITH YOUR ACTUAL VALUES
+        // Author: Fast Friends
+        // ----- Configuration -----
         const WEBHOOK_URL = 'https://hook.us1.make.com/mtq4dd33f7fp1zofph6bdqee3oskpyd4';
-        const SECRET_KEY = '%mEAaMADE8@wtyUkH3#&FOg&'; // Change this to your own secret
-        
-        // Get URL parameters to pass through
+        const SECRET_KEY  = '%mEAaMADE8@wtyUkH3#&FOg&';
+        const TIMEOUT_MS  = 15000; // hard timeout so we don't hang forever
+
+        // Pass through any URL parameters from Notion
         const urlParams = new URLSearchParams(window.location.search);
-        const pageData = Object.fromEntries(urlParams.entries());
-        
-        // Add timestamp, unique ID, and secret authentication
+        const pageData  = Object.fromEntries(urlParams.entries());
+
         const webhookData = {
             secret: SECRET_KEY,
             ...pageData,
-            timestamp: new Date().toISOString(),
-            trigger_id: generateUniqueId(),
-            source: 'notion_button',
-            user_agent: navigator.userAgent
+            timestamp:   new Date().toISOString(),
+            trigger_id:  generateUniqueId(),
+            source:      'notion_button',
+            user_agent:  navigator.userAgent
         };
 
         function generateUniqueId() {
             return Date.now().toString(36) + Math.random().toString(36).substr(2);
         }
 
-        async function triggerWebhook() {
-            try {
-                const response = await fetch(WEBHOOK_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(webhookData)
-                });
+        // Append a cache-buster to the URL so no proxy / browser ever serves a cached response
+        function withCacheBuster(url) {
+            const sep = url.includes('?') ? '&' : '?';
+            return url + sep + '_cb=' + Date.now() + Math.random().toString(36).slice(2, 8);
+        }
 
-                if (response.ok) {
-                    showSuccess();
-                    startCountdown();
-                } else {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-            } catch (error) {
-                showError(error.message);
+        // Primary attempt: a CORS-"simple" POST.
+        // KEY FIX: using Content-Type: text/plain avoids the CORS preflight (OPTIONS) request
+        // that was almost certainly being blocked on your colleague's machine.
+        // Make.com still parses the JSON body correctly.
+        async function primaryAttempt() {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+            try {
+                const res = await fetch(withCacheBuster(WEBHOOK_URL), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, // simple request, no preflight
+                    body: JSON.stringify(webhookData),
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    mode: 'cors',
+                    redirect: 'follow',
+                    keepalive: true,
+                    signal: controller.signal
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+                return { ok: true, mode: 'cors' };
+            } finally {
+                clearTimeout(timer);
             }
         }
 
-        function showSuccess() {
-            document.getElementById('loading').classList.add('hidden');
-            document.getElementById('success').classList.remove('hidden');
+        // Fallback: fire-and-forget no-cors POST. We can't read the response,
+        // but the request still reaches Make.com. Used only if the primary attempt fails.
+        async function fallbackNoCors() {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+            try {
+                await fetch(withCacheBuster(WEBHOOK_URL), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+                    body: JSON.stringify(webhookData),
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    mode: 'no-cors',
+                    keepalive: true,
+                    signal: controller.signal
+                });
+                return { ok: true, mode: 'no-cors' };
+            } finally {
+                clearTimeout(timer);
+            }
         }
 
+        async function triggerWebhook() {
+            let primaryErr = null;
+            try {
+                const r = await primaryAttempt();
+                showSuccess(r.mode);
+                startCountdown();
+                return;
+            } catch (e) {
+                primaryErr = e;
+            }
+
+            // If the first attempt failed (CORS, network, extension, etc.), try the no-cors fallback.
+            try {
+                const r = await fallbackNoCors();
+                showSuccess(r.mode + ' (fallback)');
+                startCountdown();
+            } catch (e2) {
+                showError(
+                    (primaryErr ? ('Primary: ' + primaryErr.message + ' | ') : '') +
+                    'Fallback: ' + e2.message
+                );
+            }
+        }
+
+        function showSuccess(modeLabel) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('success').classList.remove('hidden');
+            // Optional: log which path succeeded so you can confirm fixes
+            console.log('[webhook] success via', modeLabel);
+        }
         function showError(message) {
             document.getElementById('loading').classList.add('hidden');
             document.getElementById('error').classList.remove('hidden');
             document.getElementById('error-message').textContent = message;
+            // Helpful debug info for the colleague to share back
+            document.getElementById('debug-info').textContent =
+                'UA: ' + navigator.userAgent + ' | online: ' + navigator.onLine;
         }
-
         function startCountdown() {
             let seconds = 3;
-            const countdownElement = document.getElementById('countdown');
-            
+            const el = document.getElementById('countdown');
             const interval = setInterval(() => {
                 seconds--;
-                countdownElement.textContent = seconds;
-                
+                el.textContent = seconds;
                 if (seconds <= 0) {
                     clearInterval(interval);
                     window.close();
@@ -142,7 +199,7 @@
             }, 1000);
         }
 
-        // Trigger the webhook when page loads
+        // Kick off
         triggerWebhook();
     </script>
 </body>
