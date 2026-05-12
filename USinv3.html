@@ -100,18 +100,30 @@
             return url + sep + '_cb=' + Date.now() + Math.random().toString(36).slice(2, 8);
         }
 
-        // Primary attempt: a CORS-"simple" POST.
-        // KEY FIX: using Content-Type: text/plain avoids the CORS preflight (OPTIONS) request
-        // that was almost certainly being blocked on your colleague's machine.
-        // Make.com still parses the JSON body correctly.
+        // Build a form-urlencoded body. This is a CORS "simple request" (no preflight),
+        // AND Make.com parses each field into its own top-level property — same shape
+        // as the original application/json version.
+        // Author: Fast Friends
+        function buildFormBody(data) {
+            const params = new URLSearchParams();
+            for (const [k, v] of Object.entries(data)) {
+                params.append(k, v == null ? '' : String(v));
+            }
+            return params.toString();
+        }
+        const FORM_BODY = buildFormBody(webhookData);
+
+        // Primary attempt: form-urlencoded POST.
+        // KEY FIX: avoids the CORS preflight (OPTIONS) that was being blocked on your
+        // colleague's machine, while still giving Make.com structured per-field data.
         async function primaryAttempt() {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
             try {
                 const res = await fetch(withCacheBuster(WEBHOOK_URL), {
                     method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, // simple request, no preflight
-                    body: JSON.stringify(webhookData),
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                    body: FORM_BODY,
                     cache: 'no-store',
                     credentials: 'omit',
                     mode: 'cors',
@@ -134,8 +146,8 @@
             try {
                 await fetch(withCacheBuster(WEBHOOK_URL), {
                     method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-                    body: JSON.stringify(webhookData),
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                    body: FORM_BODY,
                     cache: 'no-store',
                     credentials: 'omit',
                     mode: 'no-cors',
