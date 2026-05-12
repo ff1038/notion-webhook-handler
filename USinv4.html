@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Author: Fast Friends -->
+    <!-- Prevent the HTML page itself from being cached by browsers / CDNs -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Processing Request...</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .container {
+            text-align: center;
+            padding: 2rem;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            max-width: 400px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .success { color: #4CAF50; font-size: 1.2rem; font-weight: bold; }
+        .error   { color: #f44336; font-size: 1rem; }
+        .hidden  { display: none; }
+        small.debug { opacity: 0.7; display: block; margin-top: 1rem; font-size: 0.75rem; word-break: break-all; }
+        #hidden_zone { position: absolute; width: 0; height: 0; overflow: hidden; visibility: hidden; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="loading">
+            <div class="spinner"></div>
+            <h2>Processing your request...</h2>
+            <p>Please wait while we trigger your webhook.</p>
+        </div>
+
+        <div id="success" class="hidden">
+            <h2 class="success">&#10003; Success!</h2>
+            <p>Your webhook has been triggered successfully.</p>
+            <p><small>This window will close in <span id="countdown">3</span> seconds...</small></p>
+        </div>
+
+        <div id="error" class="hidden">
+            <h2 class="error">&#10007; Error</h2>
+            <p>There was an issue triggering your webhook.</p>
+            <p><small id="error-message"></small></p>
+            <small class="debug" id="debug-info"></small>
+        </div>
+    </div>
+
+    <!-- Hidden iframe + form used by the form-POST fallback. -->
+    <div id="hidden_zone">
+        <iframe id="webhook_iframe" name="webhook_iframe"></iframe>
+    </div>
+
+    <script>
+        // Author: Fast Friends
+        // -------------------------------------------------------------
+        // Strategy: try three independent network mechanisms in sequence
+        // until one succeeds. They use completely different code paths,
+        // so if a browser extension / proxy / Safari setting interferes
+        // with one, another will usually get through.
+        //
+        // 1) Hidden FORM POST into a hidden IFRAME  -- the classic
+        //    pre-AJAX way to POST data. Goes through the browser's
+        //    document-navigation pipeline, not fetch/XHR. Most robust.
+        // 2) IMAGE BEACON (GET)  -- uses the image loader, which is
+        //    almost never blocked. Payload goes in the URL.
+        // 3) FETCH (form-urlencoded, no preflight)  -- the modern way;
+        //    kept as a last resort.
+        // -------------------------------------------------------------
+
+        // ----- Configuration -----
+        const WEBHOOK_URL = 'https://hook.us1.make.com/mtq4dd33f7fp1zofph6bdqee3oskpyd4';
+        const SECRET_KEY  = '%mEAaMADE8@wtyUkH3#&FOg&';
+        const STEP_TIMEOUT_MS = 8000; // give each mechanism 8s before moving on
+
+        // Pass through any URL parameters from Notion
+        const urlParams = new URLSearchParams(window.location.search);
+        const pageData  = Object.fromEntries(urlParams.entries());
+
+        const webhookData = {
+            secret: SECRET_KEY,
+            ...pageData,
+            timestamp:   new Date().toISOString(),
+            trigger_id:  generateUniqueId(),
+            source:      'notion_button',
+            user_agent:  navigator.userAgent
+        };
+
+        function generateUniqueId() {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2);
+        }
+        function withCacheBuster(url) {
+            const sep = url.includes('?') ? '&' : '?';
+            return url + sep + '_cb=' + Date.now() + Math.random().toString(36).slice(2, 8);
+        }
+
+        // ===== METHOD 1: Hidden form POST into hidden iframe =========
+        // This is the gold-standard fallback. It does not use fetch/XHR
+        // at all -- it's a regular HTML form submission.
+        function tryFormIframe() {
+            return new Promise((resolve, reject) => {
+                const iframe = document.getElementById('webhook_iframe');
+                let settled = false;
+                const done = (ok, why) => {
+                    if (settled) return;
+                    settled = true;
+                    iframe.removeEventListener('load', onLoad);
+                    iframe.removeEventListener('error', onErr);
+                    clearTimeout(timer);
+                    ok ? resolve('form-iframe') : reject(new Error(why));
+                };
+                const onLoad = () => done(true);   // iframe finished navigation = POST sent + response received
+                const onErr  = () => done(false, 'iframe error');
+                iframe.addEventListener('load', onLoad);
+                iframe.addEventListener('error', onErr);
+
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = withCacheBuster(WEBHOOK_URL);
+                form.target = 'webhook_iframe';
+                form.enctype = 'application/x-www-form-urlencoded';
+                form.acceptCharset = 'UTF-8';
+                form.style.display = 'none';
+                for (const [k, v] of Object.entries(webhookData)) {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = k;
+                    input.value = v == null ? '' : String(v);
+                    form.appendChild(input);
+                }
+                document.getElementById('hidden_zone').appendChild(form);
+                const timer = setTimeout(() => done(false, 'form-iframe timeout'), STEP_TIMEOUT_MS);
+                try { form.submit(); }
+                catch (e) { done(false, 'form.submit threw: ' + e.message); }
+            });
+        }
+
+        // ===== METHOD 2: Image beacon (GET) ==========================
+        // The browser loads <img src="...">. Make.com accepts GET with
+        // query-string params. The image will "error" because Make
+        // doesn't return image bytes -- but the request still hits the
+        // server, which is all we care about.
+        function tryImageBeacon() {
+            return new Promise((resolve, reject) => {
+                const params = new URLSearchParams();
+                for (const [k, v] of Object.entries(webhookData)) {
+                    params.append(k, v == null ? '' : String(v));
+                }
+                const url = withCacheBuster(WEBHOOK_URL) + '&' + params.toString();
+                if (url.length > 7500) {
+                    reject(new Error('image beacon URL too long (' + url.length + ' chars)'));
+                    return;
+                }
+                const img = new Image();
+                let settled = false;
+                const done = (ok, why) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    // onerror is the expected outcome here -- the server
+                    // returns text, not an image. Both onload AND onerror
+                    // mean the request was sent + something came back.
+                    ok ? resolve('image-beacon') : reject(new Error(why));
+                };
+                img.onload  = () => done(true);
+                img.onerror = () => done(true);  // request reached server
+                const timer = setTimeout(() => done(false, 'image beacon timeout'), STEP_TIMEOUT_MS);
+                img.src = url;
+            });
+        }
+
+        // ===== METHOD 3: fetch (form-urlencoded, no CORS preflight) ===
+        function tryFetch() {
+            return new Promise(async (resolve, reject) => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), STEP_TIMEOUT_MS);
+                try {
+                    const formBody = new URLSearchParams();
+                    for (const [k, v] of Object.entries(webhookData)) {
+                        formBody.append(k, v == null ? '' : String(v));
+                    }
+                    const res = await fetch(withCacheBuster(WEBHOOK_URL), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                        body: formBody.toString(),
+                        cache: 'no-store',
+                        credentials: 'omit',
+                        mode: 'cors',
+                        keepalive: true,
+                        signal: controller.signal
+                    });
+                    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+                    resolve('fetch');
+                } catch (e) {
+                    reject(e);
+                } finally {
+                    clearTimeout(timer);
+                }
+            });
+        }
+
+        // ===== Orchestrator: try each method in turn =================
+        async function triggerWebhook() {
+            const errors = [];
+            const methods = [
+                ['form-iframe',  tryFormIframe],
+                ['image-beacon', tryImageBeacon],
+                ['fetch',        tryFetch]
+            ];
+            for (const [name, fn] of methods) {
+                try {
+                    const winner = await fn();
+                    showSuccess(winner);
+                    startCountdown();
+                    return;
+                } catch (e) {
+                    errors.push(name + ': ' + e.message);
+                }
+            }
+            showError(errors.join(' | '));
+        }
+
+        function showSuccess(modeLabel) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('success').classList.remove('hidden');
+            console.log('[webhook] success via', modeLabel);
+        }
+        function showError(message) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('error').classList.remove('hidden');
+            document.getElementById('error-message').textContent = message;
+            document.getElementById('debug-info').textContent =
+                'UA: ' + navigator.userAgent + ' | online: ' + navigator.onLine;
+        }
+        function startCountdown() {
+            let seconds = 3;
+            const el = document.getElementById('countdown');
+            const interval = setInterval(() => {
+                seconds--;
+                el.textContent = seconds;
+                if (seconds <= 0) {
+                    clearInterval(interval);
+                    window.close();
+                }
+            }, 1000);
+        }
+
+        // Kick off
+        triggerWebhook();
+    </script>
+</body>
+</html>
